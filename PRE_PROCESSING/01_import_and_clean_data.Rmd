@@ -1,0 +1,381 @@
+---
+title: "01 - Import and clean systems-serology data"
+author: "Paola Lopez"
+output: html_document
+---
+
+This notebook imports the raw Luminex assay and study manifest, subtracts PBS
+background, matches samples to participant metadata, and calculates the
+negative-control detection thresholds used throughout the study.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(lubridate)
+library(readxl)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "data_preprocessing.R"))
+```
+
+## 1. Import assay data and metadata
+
+Place the two source workbooks in `INPUT_VARIABLES/raw/`, or set the
+`COVID_ANTIBODY_RAW_DIR` environment variable to their location.
+
+```{r import-data}
+assay_file <- raw_data_path("merck-data-pbs.xlsx")
+metadata_file <- raw_data_path("meta_manifest_FINAL_v2.xlsx")
+assert_files_exist(c(assay_file, metadata_file))
+
+raw_data <- as.data.frame(read_excel(assay_file))
+meta_data <- as.data.frame(read_excel(metadata_file))
+
+excel_date_columns <- c(
+  "Date of Baby COVID",
+  "Date of Vax 2",
+  "Date of Flu Vax",
+  "Date of TDAP",
+  "Date of CB Collection"
+)
+meta_data[excel_date_columns] <- lapply(
+  meta_data[excel_date_columns],
+  excel_dates
+)
+```
+
+## 2. Subtract PBS background and log-transform measurements
+
+```{r background-correction}
+raw_data_plate <- raw_data %>%
+  fill(`Box ID`, .direction = "down")
+
+assay_columns <- names(raw_data_plate)[4:ncol(raw_data_plate)]
+pbs_values <- raw_data_plate[
+  raw_data_plate$`Tube Label` == "PBS",
+  assay_columns,
+  drop = FALSE
+]
+pbs_mean <- colMeans(pbs_values[vapply(pbs_values, is.numeric, logical(1))])
+
+sample_rows <- raw_data_plate$`Box ID` != "Negative controls"
+sample_values <- raw_data_plate[sample_rows, assay_columns, drop = FALSE]
+sample_final <- background_correct(sample_values, pbs_mean)
+
+sample_final_labels <- cbind(
+  Box_ID = raw_data_plate$`Box ID`[sample_rows],
+  Tube_labels = raw_data_plate$`Tube Label`[sample_rows],
+  Well_ID = raw_data_plate$`Well ID`[sample_rows],
+  sample_final
+)
+```
+
+## 3. Separate maternal, cord-blood, and infant samples
+
+```{r split-sample-types}
+box_labels <- unique(raw_data_plate$`Box ID`)
+
+mgh_data <- sample_final_labels[
+  sample_final_labels$Box_ID %in% box_labels[1:2],
+  ,
+  drop = FALSE
+]
+bwh_data <- sample_final_labels[
+  sample_final_labels$Box_ID %in% box_labels[6],
+  ,
+  drop = FALSE
+]
+infant_data <- sample_final_labels[
+  sample_final_labels$Box_ID %in% box_labels[3:5],
+  ,
+  drop = FALSE
+]
+
+mgh_tokens <- strsplit(mgh_data$Tube_labels, " ")
+mgh_maternal <- mgh_data[vapply(mgh_tokens, `[`, character(1), 2) == "M", ]
+mgh_cord <- mgh_data[vapply(mgh_tokens, `[`, character(1), 2) == "CB", ]
+
+bwh_tokens <- strsplit(bwh_data$Tube_labels, "\r\n")
+bwh_sample_types <- trimws(vapply(bwh_tokens, `[`, character(1), 2))
+bwh_maternal <- bwh_data[bwh_sample_types == "BLD/SST", ]
+bwh_cord <- bwh_data[bwh_sample_types == "CORD", ]
+
+comb_mom_data <- rbind(bwh_maternal, mgh_maternal)
+comb_CB_data <- rbind(mgh_cord, bwh_cord)
+```
+
+## 4. Match maternal samples to the study manifest
+
+```{r maternal-metadata}
+maternal_columns <- c(
+  "TubeID", "Maternal_ID", "BWH_or_MGH", "BoxID", "PlateID", "WellID",
+  "COV_or_Vax", "COVID_date", "GA_at_COVID+", "Date_Vax1", "Date_Vax2",
+  "GA_Vax1", "VaccType", "Date_Flu", "Date_TDAP", "EDD", "GA_Delivery",
+  "CB_collected_Y_N", "Serum_or_Plasma", "PediID"
+)
+mom_meta_data <- as.data.frame(
+  matrix(NA_character_, nrow = nrow(comb_mom_data), ncol = length(maternal_columns))
+)
+names(mom_meta_data) <- maternal_columns
+mom_meta_data$TubeID <- comb_mom_data$Tube_labels
+mom_meta_data$BoxID <- comb_mom_data$Box_ID
+mom_meta_data$WellID <- comb_mom_data$Well_ID
+
+maternal_box_labels <- unique(comb_mom_data$Box_ID)
+
+for (i in seq_len(nrow(mom_meta_data))) {
+  is_bwh <- mom_meta_data$BoxID[i] == maternal_box_labels[1]
+
+  if (is_bwh) {
+    mom_meta_data$PlateID[i] <- "BWH_OB_Boxmap"
+    tube_name <- gsub(" ", "", strsplit(mom_meta_data$TubeID[i], "\r\n")[[1]][1])
+  } else {
+    mom_meta_data$PlateID[i] <- "MGH_OB_Boxmap"
+    tube_parts <- strsplit(mom_meta_data$TubeID[i], " ")[[1]]
+    tube_name <- paste(tube_parts[1:2], collapse = " ")
+  }
+
+  participant <- meta_data[meta_data$`MB Tube Label` == tube_name, ]
+  participant <- participant[!is.na(participant$`CB Tube Label`), ]
+
+  mom_meta_data$Maternal_ID[i] <- participant$`Maternal ID`[1]
+  mom_meta_data$BWH_or_MGH[i] <- strsplit(mom_meta_data$Maternal_ID[i], "-")[[1]][1]
+  mom_meta_data$Serum_or_Plasma[i] <- participant$`Sample Type...29`[1]
+  mom_meta_data$Infant_gender[i] <- participant$`Fetal Sex`[1]
+  mom_meta_data$PediID[i] <- participant$`Pedi-ID`[1]
+
+  for (j in seq_len(12)) {
+    values <- participant[[11 + j]]
+    observed <- as.character(values[!is.na(values)])
+    mom_meta_data[i, j + 6] <- if (length(observed) > 1) {
+      paste(observed, collapse = "_")
+    } else if (length(observed) == 1) {
+      observed
+    } else {
+      NA_character_
+    }
+  }
+}
+```
+
+## 5. Match infant samples to the study manifest
+
+```{r infant-metadata}
+infant_columns <- c(
+  "TubeID", "PediID", "MaternalID", "MGH-BWH", "BoxID", "PlateID", "WellID",
+  "Timepoint", "Pedi_label", "Date_collection", "Neonatal_DOB", "Fetal_Sex",
+  "COVID_Y_or_N", "Date_of_Baby_COVID", "Sample_collected_after_baby_COVID",
+  "Days_BTWN_COVID_sample_collection", "Mom_Vax_type", "GA_COVID+", "Date_Vax1",
+  "Date_Vax2", "GA_Vax1", "Date_Flu", "Date_TDAP", "GA_delivery"
+)
+infant_meta_data <- as.data.frame(
+  matrix(NA_character_, nrow = nrow(infant_data), ncol = length(infant_columns))
+)
+names(infant_meta_data) <- infant_columns
+infant_meta_data$TubeID <- infant_data$Tube_labels
+infant_meta_data$BoxID <- infant_data$Box_ID
+infant_meta_data$PlateID <- "MGH_PEDI_BOXMAP"
+infant_meta_data$WellID <- infant_data$Well_ID
+
+for (i in seq_len(nrow(infant_meta_data))) {
+  tube_prefix <- strsplit(infant_meta_data$TubeID[i], " ")[[1]][1]
+  pedi_label <- paste0("Pedi-", tube_prefix)
+  participant <- meta_data[meta_data$`Pedi Label` == pedi_label, ]
+
+  infant_meta_data$PediID[i] <- participant$`Pedi-ID`[1]
+  infant_meta_data$MaternalID[i] <- participant$`Maternal ID`[1]
+  infant_meta_data$`MGH-BWH`[i] <- strsplit(infant_meta_data$MaternalID[i], "-")[[1]][1]
+  infant_meta_data[i, 8:16] <- as.character(participant[1, 2:10])
+  infant_meta_data$Mom_Vax_type[i] <- participant$`Type of Vax`[1]
+  infant_meta_data$`GA_COVID+`[i] <- as.character(participant$`GA at COVID+`[1])
+  infant_meta_data$Date_Vax1[i] <- as.character(participant$`Date of Vax 1`[1])
+  infant_meta_data$Date_Vax2[i] <- as.character(participant$`Date of Vax 2`[1])
+  infant_meta_data$GA_Vax1[i] <- as.character(participant$`GA at Vax 1`[1])
+  infant_meta_data$Date_Flu[i] <- as.character(participant$`Date of Flu Vax`[1])
+  infant_meta_data$Date_TDAP[i] <- as.character(participant$`Date of TDAP`[1])
+  infant_meta_data$GA_delivery[i] <- as.character(participant$`GA at Delivery`[1])
+  infant_meta_data$COV_or_Vax_MOM[i] <- participant$`COV or Vax`[1]
+}
+```
+
+## 6. Match cord-blood samples to the study manifest
+
+```{r cord-metadata}
+cord_columns <- c(
+  "TubeID", "BoxID", "Well_ID", "PlateID", "Maternal_ID", "PediID",
+  "DateofCollection", "CB_sample_type", "CB_Tube_label", "MOM_COVID_STATUS",
+  "Infant_gender", "Mom_COV_vax_type"
+)
+cord_blood_meta <- as.data.frame(
+  matrix(NA_character_, nrow = nrow(comb_CB_data), ncol = length(cord_columns))
+)
+names(cord_blood_meta) <- cord_columns
+cord_blood_meta$TubeID <- comb_CB_data$Tube_labels
+cord_blood_meta$BoxID <- comb_CB_data$Box_ID
+cord_blood_meta$Well_ID <- comb_CB_data$Well_ID
+
+cord_box_labels <- unique(comb_CB_data$Box_ID)
+
+for (i in seq_len(nrow(cord_blood_meta))) {
+  is_bwh <- cord_blood_meta$BoxID[i] == cord_box_labels[3]
+
+  if (is_bwh) {
+    cord_blood_meta$PlateID[i] <- "BWH OB Boxmap"
+    tube_name <- gsub(" ", "", strsplit(cord_blood_meta$TubeID[i], "\r\n")[[1]][1])
+  } else {
+    cord_blood_meta$PlateID[i] <- "MGH OB Boxmap"
+    tube_parts <- strsplit(cord_blood_meta$TubeID[i], " ")[[1]]
+    tube_name <- paste(tube_parts[1:2], collapse = " ")
+  }
+
+  if (tube_name == "VY-MGH-9-179 CB") {
+    tube_name <- "VY-MGH-9-179A CB"
+  }
+
+  participant <- meta_data[meta_data$`CB Tube Label` == tube_name, ]
+  cord_blood_meta$CB_Tube_label[i] <- tube_name
+  cord_blood_meta$Maternal_ID[i] <- participant$`Maternal ID`[1]
+  cord_blood_meta$CB_sample_type[i] <- participant$`Sample Type...26`[1]
+  cord_blood_meta$PediID[i] <- participant$`Pedi-ID`[1]
+  cord_blood_meta$DateofCollection[i] <- as.character(
+    participant$`Date of collection`[!is.na(participant$`Date of CB Collection`)][1]
+  )
+  cord_blood_meta$MOM_COVID_STATUS[i] <- participant$`COV or Vax`[1]
+  cord_blood_meta$Infant_gender[i] <- participant$`Fetal Sex`[1]
+  cord_blood_meta$Mom_COV_vax_type[i] <- participant$`Type of Vax`[1]
+}
+```
+
+## 7. Merge technical duplicate infant samples
+
+```{r merge-duplicates}
+duplicate_labels <- unique(
+  infant_meta_data$Pedi_label[duplicated(infant_meta_data$Pedi_label)]
+)
+duplicate_metadata <- infant_meta_data[
+  infant_meta_data$Pedi_label %in% duplicate_labels,
+]
+
+new_infant_meta <- infant_meta_data[
+  !infant_meta_data$Pedi_label %in% duplicate_labels,
+]
+new_infant_data <- infant_data[
+  !infant_data$Tube_labels %in% duplicate_metadata$TubeID,
+]
+
+if (length(duplicate_labels) > 0) {
+  merged_metadata <- duplicate_metadata[seq_along(duplicate_labels), , drop = FALSE]
+  merged_data <- infant_data[seq_along(duplicate_labels), , drop = FALSE]
+
+  for (i in seq_along(duplicate_labels)) {
+    metadata_rows <- infant_meta_data[
+      infant_meta_data$Pedi_label == duplicate_labels[i],
+    ]
+    data_rows <- infant_data[infant_data$Tube_labels %in% metadata_rows$TubeID, ]
+    merged_label <- paste0(strsplit(data_rows$Tube_labels[1], " ")[[1]][1], "-MERGED")
+
+    merged_metadata[i, ] <- lapply(metadata_rows, function(x) {
+      values <- unique(x)
+      if (length(values) == 1) values else "MERGED"
+    })
+    merged_metadata$TubeID[i] <- merged_label
+
+    merged_data[i, 1:3] <- list(
+      metadata_rows$BoxID[1],
+      merged_label,
+      metadata_rows$WellID[1]
+    )
+    merged_data[i, 4:ncol(merged_data)] <- colMeans(
+      data_rows[, 4:ncol(data_rows), drop = FALSE]
+    )
+  }
+
+  new_infant_meta <- rbind(new_infant_meta, merged_metadata)
+  new_infant_data <- rbind(new_infant_data, merged_data)
+}
+```
+
+## 8. Calculate gestational age at each vaccination
+
+```{r gestational-age}
+new_infant_meta$GA_COVID_days <- weeks_days_to_days(new_infant_meta$`GA_COVID+`)
+new_infant_meta$GA_Vax1_days <- weeks_days_to_days(new_infant_meta$GA_Vax1)
+new_infant_meta$GA_delivery_days <- weeks_days_to_days(new_infant_meta$GA_delivery)
+new_infant_meta$GA_Vax2_days <- round(gestational_age_at_event(
+  new_infant_meta$Neonatal_DOB,
+  new_infant_meta$GA_delivery_days,
+  new_infant_meta$Date_Vax2
+))
+new_infant_meta$GA_flu_days <- round(gestational_age_at_event(
+  new_infant_meta$Neonatal_DOB,
+  new_infant_meta$GA_delivery_days,
+  new_infant_meta$Date_Flu
+))
+new_infant_meta$GA_TDAP_days <- round(gestational_age_at_event(
+  new_infant_meta$Neonatal_DOB,
+  new_infant_meta$GA_delivery_days,
+  new_infant_meta$Date_TDAP
+))
+
+new_mom_meta <- mom_meta_data
+new_mom_meta$GA_COVID_days <- weeks_days_to_days(new_mom_meta$`GA_at_COVID+`)
+new_mom_meta$GA_Vax1_days <- weeks_days_to_days(new_mom_meta$GA_Vax1)
+new_mom_meta$GA_delivery_days <- weeks_days_to_days(new_mom_meta$GA_Delivery)
+new_mom_meta$GA_Vax2_days <- round(gestational_age_at_event(
+  new_mom_meta$Date_Vax1,
+  new_mom_meta$GA_Vax1_days,
+  new_mom_meta$Date_Vax2
+))
+new_mom_meta$GA_flu_days <- round(gestational_age_at_event(
+  new_mom_meta$Date_Vax1,
+  new_mom_meta$GA_Vax1_days,
+  new_mom_meta$Date_Flu
+))
+new_mom_meta$GA_TDAP_days <- round(gestational_age_at_event(
+  new_mom_meta$Date_Vax1,
+  new_mom_meta$GA_Vax1_days,
+  new_mom_meta$Date_TDAP
+))
+```
+
+## 9. Calculate negative-control thresholds
+
+The study defined detection as the negative-control mean plus one standard
+deviation after PBS subtraction and log10 transformation.
+
+```{r negative-control-thresholds}
+negative_rows <- raw_data_plate$`Box ID` == "Negative controls"
+negative_values <- raw_data_plate[negative_rows, assay_columns, drop = FALSE]
+negative_final <- background_correct(negative_values, pbs_mean)
+neg_control_threshold <- colMeans(negative_final) +
+  apply(negative_final, 2, stats::sd)
+```
+
+## 10. Validate alignment and save intermediate objects
+
+```{r validate-and-save}
+stopifnot(
+  identical(as.character(new_infant_meta$TubeID), as.character(new_infant_data$Tube_labels)),
+  identical(as.character(cord_blood_meta$TubeID), as.character(comb_CB_data$Tube_labels)),
+  identical(as.character(new_mom_meta$TubeID), as.character(comb_mom_data$Tube_labels))
+)
+
+dir.create(input_path(), recursive = TRUE, showWarnings = FALSE)
+save(
+  new_infant_data,
+  new_infant_meta,
+  comb_mom_data,
+  new_mom_meta,
+  comb_CB_data,
+  cord_blood_meta,
+  neg_control_threshold,
+  file = input_path("preprocessing_intermediate.RData")
+)
+```

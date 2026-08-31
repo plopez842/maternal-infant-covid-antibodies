@@ -1,0 +1,217 @@
+---
+title: "Supplementary Figure 3 - UMAP of two-month infant profiles"
+output: html_document
+---
+
+This notebook performs an unsupervised UMAP analysis of two-month infant
+antibody profiles and examines associations with vaccination group, infant
+sex, and selected antibody features. Run `Figure_3/01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggpubr)
+library(rstatix)
+library(Seurat)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+stopifnot(all(vapply(
+  c("infant_data_M2", "infant_meta_M2", "infant_persist_M2"),
+  exists,
+  logical(1)
+)))
+set.seed(2023)
+```
+
+## 1. Select antibody features
+
+```{r prepare-features}
+cov_antigens <- paste(
+  c(
+    "RBD_beta", "RBD_delta", "RBD_gamma", "RBD_omicron", "S1", "S2",
+    "Spike_alpha", "Spike_beta", "Spike_delta", "Spike_gamma",
+    "Spike_omicron", "RBD_alpha", "RBD_WT", "Spike_WT"
+  ),
+  collapse = "|"
+)
+umap_data <- select_serology_features(infant_data_M2, include = cov_antigens)
+umap_data <- filter_detected_features(
+  umap_data,
+  infant_persist_M2,
+  minimum_fraction = 0.30
+)
+
+rownames(umap_data) <- infant_meta_M2$Pedi_label
+umap_metadata <- infant_meta_M2
+rownames(umap_metadata) <- infant_meta_M2$Pedi_label
+```
+
+## 2. Run PCA, clustering, and UMAP
+
+```{r run-umap}
+seurat_object <- CreateSeuratObject(counts = t(umap_data))
+seurat_object@meta.data <- umap_metadata
+seurat_object <- FindVariableFeatures(seurat_object, selection.method = "vst")
+seurat_object <- ScaleData(seurat_object, features = rownames(seurat_object))
+seurat_object <- RunPCA(
+  seurat_object,
+  features = VariableFeatures(seurat_object),
+  npcs = 40
+)
+seurat_object <- FindNeighbors(seurat_object, dims = 1:20)
+seurat_object <- FindClusters(seurat_object, resolution = 0.5)
+seurat_object <- RunUMAP(
+  seurat_object,
+  dims = 1:20,
+  n.neighbors = 30,
+  min.dist = 0.2
+)
+
+cluster_markers <- FindAllMarkers(
+  seurat_object,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+```
+
+## 3. Assemble UMAP coordinates and metadata
+
+```{r umap-data-frame}
+umap_coordinates <- Embeddings(seurat_object[["umap"]])
+umap_plot_data <- cbind(seurat_object[[]], umap_coordinates)
+umap_feature_data <- cbind(umap_data, umap_plot_data)
+
+group_colors <- c(
+  "Group 1" = "#669ccb",
+  "Group 2" = "#004488",
+  "Group 3" = "#eccc64",
+  "Group 4" = "#92414e",
+  "Group 5" = "#e69aa3"
+)
+sex_colors <- c("M" = "#00798C", "F" = "#d1495b")
+cluster_levels <- levels(umap_plot_data$seurat_clusters)
+cluster_colors <- grDevices::colorRampPalette(c("#edae49", "#66a182"))(
+  length(cluster_levels)
+)
+names(cluster_colors) <- cluster_levels
+
+umap_theme <- theme_classic() +
+  theme(
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    plot.title = element_text(hjust = 0.55, face = "bold", size = 18)
+  )
+```
+
+## 4. Plot sample annotations
+
+```{r annotation-plots}
+umap_by_group <- ggplot(
+  umap_plot_data,
+  aes(UMAP_1, UMAP_2, fill = unique_groups)
+) +
+  geom_point(shape = 21, size = 5) +
+  scale_fill_manual(values = group_colors) +
+  labs(title = "Infant 2 months", fill = NULL) +
+  umap_theme
+
+umap_by_sex <- ggplot(
+  umap_plot_data,
+  aes(UMAP_1, UMAP_2, fill = Fetal_Sex)
+) +
+  geom_point(shape = 21, size = 5) +
+  scale_fill_manual(values = sex_colors) +
+  labs(title = "Infant 2 months", fill = "Infant sex") +
+  umap_theme
+
+umap_by_cluster <- ggplot(
+  umap_plot_data,
+  aes(UMAP_1, UMAP_2, fill = seurat_clusters)
+) +
+  geom_point(shape = 21, size = 5) +
+  scale_fill_manual(values = cluster_colors) +
+  labs(title = "Infant 2 months", fill = "Cluster") +
+  umap_theme
+```
+
+## 5. Plot selected antibody features
+
+```{r feature-plots}
+features_to_plot <- c("IgG1_Spike_WT", "IgG2_Spike_WT")
+umap_feature_plots <- setNames(lapply(features_to_plot, function(feature) {
+  ggplot(
+    umap_feature_data,
+    aes(UMAP_1, UMAP_2, fill = .data[[feature]])
+  ) +
+    geom_point(shape = 21, size = 5) +
+    scale_fill_gradientn(
+      colors = colorspace::diverge_hcl(5),
+      name = "log10 (MFI)"
+    ) +
+    labs(title = format_feature_label(feature)) +
+    umap_theme
+}), features_to_plot)
+
+umap_feature_panel <- ggarrange(
+  plotlist = umap_feature_plots,
+  nrow = 2,
+  ncol = 1
+)
+```
+
+## 6. Compare selected features by infant sex
+
+```{r sex-comparisons}
+sex_comparison_data <- cbind(infant_data_M2, infant_meta_M2)
+
+sex_plots <- setNames(lapply(features_to_plot, function(feature) {
+  plot_data <- data.frame(
+    value = sex_comparison_data[[feature]],
+    Fetal_Sex = sex_comparison_data$Fetal_Sex
+  )
+  test <- wilcox_test(plot_data, value ~ Fetal_Sex) %>%
+    add_significance("p") %>%
+    add_xy_position(x = "Fetal_Sex")
+
+  ggplot(plot_data, aes(Fetal_Sex, value, fill = Fetal_Sex)) +
+    geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+    add_pvalue(test, label = "p.signif", tip.length = c(0, 0)) +
+    scale_fill_manual(values = c("F" = "#F88379", "M" = "#189ad3")) +
+    labs(
+      x = "Infant sex",
+      y = "log10 (MFI)",
+      title = format_feature_label(feature)
+    ) +
+    theme_classic() +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5))
+}), features_to_plot)
+
+sex_comparison_panel <- ggarrange(plotlist = sex_plots, legend = "none", nrow = 2)
+```
+
+## 7. Save supplementary panels
+
+```{r save-results}
+ggsave(output_path("Sup_Fig_3", "UMAP_vaccine_group.png"), umap_by_group)
+ggsave(output_path("Sup_Fig_3", "UMAP_infant_sex.png"), umap_by_sex)
+ggsave(output_path("Sup_Fig_3", "UMAP_clusters.png"), umap_by_cluster)
+ggsave(output_path("Sup_Fig_3", "UMAP_features.png"), umap_feature_panel)
+ggsave(output_path("Sup_Fig_3", "sex_comparisons.png"), sex_comparison_panel)
+write.csv(
+  cluster_markers,
+  output_path("Sup_Fig_3", "UMAP_cluster_markers.csv"),
+  row.names = FALSE
+)
+```

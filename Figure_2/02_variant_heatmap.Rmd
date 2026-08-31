@@ -1,0 +1,222 @@
+---
+title: "Figure 2A - Antibody detection across SARS-CoV-2 variants"
+output: html_document
+---
+
+This notebook plots the proportion of cord-blood and infant samples with
+detectable antibodies to wild-type SARS-CoV-2 and five variants of concern.
+Run `01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(circlize)
+library(ComplexHeatmap)
+library(dplyr)
+library(ggsci)
+library(RColorBrewer)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+required_objects <- c(
+  "CB_data_persist", "CB_meta_v2", "infant_persist_M2", "infant_meta_M2",
+  "infant_persist_M6", "infant_meta_M6"
+)
+stopifnot(all(vapply(required_objects, exists, logical(1))))
+```
+
+## 1. Calculate the detectable fraction for each feature
+
+```{r detection-fractions}
+sample_blocks <- list(
+  make_sample_block(CB_data_persist, CB_meta_v2, "cord", "Infant_gender"),
+  make_sample_block(infant_persist_M2, infant_meta_M2, "infant", "Fetal_Sex"),
+  make_sample_block(
+    infant_persist_M6,
+    infant_meta_M6,
+    "infant 6 months",
+    "Fetal_Sex"
+  )
+)
+detection_data <- do.call(rbind, sample_blocks)
+
+variant_pattern <- paste(
+  c(
+    "Spike_WT", "RBD_WT", "Spike_alpha", "RBD_alpha",
+    "Spike_beta", "RBD_beta", "Spike_delta", "RBD_delta",
+    "Spike_gamma", "RBD_gamma", "Spike_omicron", "RBD_omicron"
+  ),
+  collapse = "|"
+)
+feature_data <- select_serology_features(detection_data, include = variant_pattern)
+
+detection_long <- feature_data %>%
+  mutate(sample_type = detection_data$sample_type) %>%
+  pivot_longer(
+    cols = all_of(names(feature_data)),
+    names_to = "feature",
+    values_to = "detected"
+  ) %>%
+  group_by(sample_type, feature) %>%
+  summarize(fraction_detected = mean(detected), .groups = "drop") %>%
+  separate(
+    feature,
+    into = c("antibody", "antigen"),
+    sep = "_",
+    extra = "merge",
+    remove = FALSE
+  ) %>%
+  mutate(
+    feature_class = if_else(grepl("^Ig", antibody), "titer", "Fc"),
+    antigen_type = if_else(grepl("^Spike", antigen), "Spike", "RBD")
+  )
+```
+
+## 2. Prepare the four heatmap matrices
+
+```{r heatmap-matrices}
+antibody_levels <- list(
+  titer = c("IgG", "IgG1", "IgG2", "IgG3", "IgG4"),
+  Fc = c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B")
+)
+antibody_labels <- list(
+  titer = c("Total IgG", "IgG1", "IgG2", "IgG3", "IgG4"),
+  Fc = c("FcRn", "FcgR2A", "FcgR2B", "FcgR3A", "FcgR3B")
+)
+variant_levels <- c("WT", "alpha", "beta", "delta", "gamma", "omicron")
+sample_levels <- c("cord", "infant", "infant 6 months")
+
+prepare_heatmap_matrix <- function(data, antigen_type, feature_class) {
+  panel <- data %>%
+    filter(
+      .data$antigen_type == antigen_type,
+      .data$feature_class == feature_class
+    ) %>%
+    mutate(
+      antibody = factor(
+        antibody,
+        levels = antibody_levels[[feature_class]],
+        labels = antibody_labels[[feature_class]]
+      ),
+      variant = factor(sub(".*_", "", antigen), levels = variant_levels),
+      sample_type = factor(sample_type, levels = sample_levels),
+      column = paste(sample_type, variant, sep = "-")
+    ) %>%
+    arrange(antibody, variant, sample_type) %>%
+    select(antibody, column, fraction_detected) %>%
+    pivot_wider(names_from = column, values_from = fraction_detected)
+
+  matrix_data <- as.data.frame(panel)
+  rownames(matrix_data) <- matrix_data$antibody
+  as.matrix(matrix_data[, -1, drop = FALSE])
+}
+
+panel_specifications <- data.frame(
+  antigen_type = c("Spike", "Spike", "RBD", "RBD"),
+  feature_class = c("titer", "Fc", "titer", "Fc"),
+  title = c(
+    "Spike Total IgG and IgG Subclass",
+    "Spike Fc Receptors",
+    "RBD Total IgG and IgG Subclass",
+    "RBD Fc Receptors"
+  )
+)
+
+heatmap_matrices <- lapply(seq_len(nrow(panel_specifications)), function(i) {
+  prepare_heatmap_matrix(
+    detection_long,
+    panel_specifications$antigen_type[i],
+    panel_specifications$feature_class[i]
+  )
+})
+```
+
+## 3. Build the heatmaps
+
+```{r build-heatmaps}
+detection_colors <- colorRamp2(
+  c(0, 0.5, 1),
+  c("#1207A3", "#FFFEFE", "#BB0103")
+)
+sample_colors <- ggsci::pal_npg()(4)[2:4]
+names(sample_colors) <- c("C", "2 m.", "6 m.")
+variant_colors <- RColorBrewer::brewer.pal(7, "Set2")[2:7]
+names(variant_colors) <- c("WT", "Alpha", "Beta", "Delta", "Gamma", "Omicron")
+
+make_heatmap <- function(matrix_data, title) {
+  column_parts <- strsplit(colnames(matrix_data), "-")
+  annotation <- data.frame(
+    Type = factor(
+      vapply(column_parts, `[`, character(1), 1),
+      levels = sample_levels,
+      labels = c("C", "2 m.", "6 m.")
+    ),
+    antigen = factor(
+      vapply(column_parts, `[`, character(1), 2),
+      levels = variant_levels,
+      labels = names(variant_colors)
+    )
+  )
+
+  top_annotation <- HeatmapAnnotation(
+    df = annotation,
+    which = "col",
+    border = TRUE,
+    gp = grid::gpar(col = "black"),
+    simple_anno_size = grid::unit(3, "mm"),
+    col = list(Type = sample_colors, antigen = variant_colors)
+  )
+
+  Heatmap(
+    matrix_data,
+    name = "% Ab",
+    col = detection_colors,
+    top_annotation = top_annotation,
+    row_names_gp = grid::gpar(fontsize = 12),
+    cluster_columns = FALSE,
+    cluster_rows = FALSE,
+    column_split = annotation$antigen,
+    border_gp = grid::gpar(col = "black", lwd = 2),
+    show_column_names = FALSE,
+    row_names_side = "left",
+    column_title = title,
+    column_title_gp = grid::gpar(fontsize = 18, fontface = "bold"),
+    width = ncol(matrix_data) * grid::unit(10, "mm"),
+    height = nrow(matrix_data) * grid::unit(15, "mm")
+  )
+}
+
+heatmaps <- Map(
+  make_heatmap,
+  heatmap_matrices,
+  panel_specifications$title
+)
+```
+
+## 4. Save Figure 2A panels
+
+```{r save-heatmaps}
+invisible(lapply(seq_along(heatmaps), function(i) {
+  grDevices::postscript(
+    output_path("Figure_2", paste0("Figure_2A_heatmap_", i, ".eps")),
+    height = 30,
+    width = 14,
+    horizontal = FALSE,
+    onefile = FALSE,
+    paper = "special"
+  )
+  draw(
+    heatmaps[[i]],
+    heatmap_legend_side = "bottom",
+    annotation_legend_side = "bottom"
+  )
+  grDevices::dev.off()
+}))
+```

@@ -1,0 +1,242 @@
+---
+title: "Figure 3B - PLSDA of two-month infant antibody profiles"
+output: html_document
+---
+
+This notebook applies repeated LASSO feature selection and PLSDA to compare
+the five maternal vaccination-timing groups at the two-month infant visit. Run
+`01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(RColorBrewer)
+library(ropls)
+library(systemsseRology)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+source(file.path(helper_dir, "plotting_functions.R"))
+
+stopifnot(all(vapply(
+  c("infant_data_M2", "infant_meta_M2", "infant_persist_M2"),
+  exists,
+  logical(1)
+)))
+set.seed(2023)
+```
+
+## 1. Select and scale serology features
+
+Features detected in more than 30% of two-month samples are retained.
+
+```{r prepare-features}
+cov_antigens <- paste(
+  c(
+    "RBD_beta", "RBD_delta", "RBD_gamma", "RBD_omicron", "S1", "S2",
+    "Spike_alpha", "Spike_beta", "Spike_delta", "Spike_gamma",
+    "Spike_omicron", "RBD_alpha", "RBD_WT", "Spike_WT"
+  ),
+  collapse = "|"
+)
+
+serology_data <- select_serology_features(
+  infant_data_M2,
+  include = cov_antigens
+)
+serology_data <- filter_detected_features(
+  serology_data,
+  infant_persist_M2,
+  minimum_fraction = 0.30
+)
+
+X <- scale(serology_data, center = TRUE, scale = TRUE)
+y <- droplevels(infant_meta_M2$unique_groups)
+```
+
+## 2. Configure feature annotations and colors
+
+```{r plot-options}
+group_colors <- c(
+  "Group 1" = "#669ccb",
+  "Group 2" = "#004488",
+  "Group 3" = "#eccc64",
+  "Group 4" = "#92414e",
+  "Group 5" = "#e69aa3"
+)
+
+feature_info <- make_plsda_feature_metadata(
+  colnames(X),
+  colors = list(group = group_colors)
+)
+
+plot_options <- list(
+  df_features = feature_info$metadata,
+  loading_alpha = 1,
+  score_alpha = 1,
+  LV_ind = c(1, 2),
+  color_features = "antigen",
+  colors = feature_info$colors,
+  y_name = "group",
+  alpha = 1,
+  size = 2.5,
+  stroke = 0.5
+)
+```
+
+## 3. Fit the full-feature PCA and PLSDA models
+
+```{r full-models}
+pca_model <- pca_ropls(X)
+pca_scores <- visualize_ropls_scores(pca_model, y, options = plot_options)
+
+plsda_options <- list(n_LV = 2)
+full_plsda_model <- train_ropls(X, y, options = plsda_options)
+full_plsda_scores <- visualize_ropls_scores(
+  full_plsda_model,
+  y,
+  options = plot_options
+) +
+  theme(axis.title = element_text(size = 13, face = "bold"))
+```
+
+## 4. Repeated LASSO feature selection and final PLSDA
+
+LASSO selection is repeated 100 times. Features selected in at least 80% of
+trials are used in the final two-latent-variable PLSDA model.
+
+```{r selected-model}
+selection_options <- list(
+  n_trials = 100,
+  threshold = 0.80,
+  return_count = FALSE
+)
+selected_features <- select_repeat(
+  X,
+  y,
+  selector = select_lasso,
+  options = selection_options
+)
+
+X_selected <- X[, selected_features, drop = FALSE]
+selected_model <- train_ropls(X_selected, y, options = plsda_options)
+
+selected_scores <- visualize_ropls_scores(
+  selected_model,
+  y,
+  options = plot_options
+) +
+  theme(axis.title = element_text(size = 18, face = "bold"))
+
+selected_loadings <- visualize_ropls_loadings(
+  selected_model,
+  options = plot_options
+) +
+  theme(axis.title = element_text(size = 18, face = "bold"))
+
+loading_options <- plot_options
+loading_options$X <- X_selected
+loading_options$y <- y
+loading_options$LV_ind <- 1
+loading_options$mark_enrichment <- TRUE
+selected_loading_bars <- visualize_ropls_loadings_bar(
+  selected_model,
+  options = loading_options
+) +
+  theme(
+    axis.text.x = element_text(size = 12, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold")
+  )
+```
+
+## 5. Summarize variable importance
+
+```{r vip}
+vip_table <- make_vip_table(selected_model, X, y, minimum_vip = 1)
+
+vip_plot <- ggplot(vip_table, aes(label, VIP, fill = enriched)) +
+  geom_col(color = "black") +
+  scale_fill_manual(values = group_colors) +
+  labs(x = NULL, y = "VIP score") +
+  theme_classic() +
+  theme(
+    axis.title.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.position = "none"
+  )
+```
+
+## 6. Validate the selected-feature model
+
+Validation uses 10-fold cross-validation, 100 label permutations, and 10
+repeated validation trials.
+
+```{r model-validation}
+validation_selection_options <- list(
+  n_trials = 100,
+  threshold = 0.30,
+  return_count = FALSE,
+  alpha = 1
+)
+lasso_selector <- function(X, y) {
+  select_repeat(
+    X,
+    y,
+    selector = select_lasso,
+    options = validation_selection_options
+  )
+}
+
+validation_method <- list(
+  select = lasso_selector,
+  train = train_ropls,
+  predict = predict_ropls,
+  score = score_accuracy
+)
+validation_options <- list(
+  n_folds = 10,
+  rf_trials = 0,
+  pt_trials = 100,
+  save = TRUE,
+  compare_pred = "y"
+)
+
+validation_results <- validate_repeat(
+  X,
+  y,
+  validation_method,
+  validation_options,
+  n_trials = 10
+)
+validation_plot <- visualize_validate(
+  validation_results,
+  options = list(y_label = "accuracy")
+) +
+  theme(
+    axis.title.y = element_text(size = 18),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(size = 18)
+  )
+```
+
+## 7. Save model figures and selected features
+
+```{r save-results}
+ggsave(output_path("Figure_3", "Figure_3B_PLSDA_scores.png"), selected_scores)
+ggsave(output_path("Figure_3", "Figure_3B_PLSDA_loadings.png"), selected_loadings)
+ggsave(output_path("Figure_3", "Figure_3B_VIP.png"), vip_plot)
+ggsave(output_path("Figure_3", "Figure_3B_validation.png"), validation_plot)
+
+write.csv(
+  data.frame(feature = selected_features),
+  output_path("Figure_3", "Figure_3B_selected_features.csv"),
+  row.names = FALSE
+)
+```

@@ -1,0 +1,34 @@
+---
+title: "Figure 3 - Load and prepare data"
+output: html_document
+---
+
+Run this notebook first. Figure 3 uses infant samples collected at two months.
+
+```{r setup, message=FALSE, warning=FALSE}
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+load_rdata("infant_data.RData", "infant_data")
+load_rdata("infant_metadata.RData", "infant_meta")
+load_rdata("negative_control_thresholds.RData", "neg_control_threshold")
+```
+
+## Prepare the two-month visit
+
+```{r prepare-two-month-data}
+m2 <- subset_timepoint(infant_data, infant_meta, "M2")
+infant_data_M2 <- m2$data
+infant_meta_M2 <- m2$metadata
+
+infant_data_persist <- apply_detection_thresholds(
+  infant_data,
+  neg_control_threshold
+)
+infant_persist_M2 <- infant_data_persist[infant_meta$Timepoint == "M2", ]
+```

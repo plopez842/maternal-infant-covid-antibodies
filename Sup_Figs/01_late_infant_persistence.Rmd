@@ -1,0 +1,132 @@
+---
+title: "Supplementary Figure 1 - Infant antibody persistence through 12 months"
+output: html_document
+---
+
+This notebook extends the Figure 1 analysis to infant samples collected at 2,
+6, 9, and 12 months. Run `Figure_1/01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggpubr)
+library(ggsci)
+library(rstatix)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+source(file.path(helper_dir, "plotting_functions.R"))
+
+required_objects <- c(
+  "infant_data_M2", "infant_meta_M2", "infant_data_M6", "infant_meta_M6",
+  "infant_data_M9", "infant_meta_M9", "infant_data_M12", "infant_meta_M12",
+  "neg_control_threshold"
+)
+stopifnot(all(vapply(required_objects, exists, logical(1))))
+```
+
+## 1. Combine infant visits
+
+```{r combine-visits}
+sample_blocks <- list(
+  make_sample_block(infant_data_M2, infant_meta_M2, "2", "Fetal_Sex"),
+  make_sample_block(infant_data_M6, infant_meta_M6, "6", "Fetal_Sex"),
+  make_sample_block(infant_data_M9, infant_meta_M9, "9", "Fetal_Sex"),
+  make_sample_block(infant_data_M12, infant_meta_M12, "12", "Fetal_Sex")
+)
+merged_samples <- do.call(rbind, sample_blocks)
+
+visit_levels <- c("2", "6", "9", "12")
+feature_data <- select_serology_features(
+  merged_samples,
+  include = "Spike_WT|RBD_WT"
+)
+long_data <- make_feature_long(merged_samples, feature_data, visit_levels)
+```
+
+## 2. Test differences and calculate detection counts
+
+```{r statistics}
+feature_tests <- kruskal_by_feature(long_data)
+long_data <- add_detection_status(long_data, neg_control_threshold)
+detection_summary <- summarize_detection(long_data)
+```
+
+## 3. Plot infant measurements over time
+
+```{r plot-features}
+igg_features <- c(
+  paste0(c("IgG", "IgG1", "IgG2", "IgG3", "IgG4"), "_Spike_WT"),
+  paste0(c("IgG", "IgG1", "IgG2", "IgG3", "IgG4"), "_RBD_WT")
+)
+fc_features <- c(
+  paste0(c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B"), "_Spike_WT"),
+  paste0(c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B"), "_RBD_WT")
+)
+
+make_x_labels <- function(feature) {
+  counts <- detection_summary[detection_summary$feature == feature, ]
+  c(
+    `2` = paste0("2 m.\n", counts$`2`),
+    `6` = paste0("6 m.\n", counts$`6`),
+    `9` = paste0("9 m.\n", counts$`9`),
+    `12` = paste0("12 m.\n", counts$`12`)
+  )
+}
+
+annotation_start <- function(feature) {
+  if (grepl("IgG2|IgG3", feature)) 5.8 else if (grepl("IgG4", feature)) 6.0 else 6.7
+}
+
+visit_colors <- ggsci::pal_npg()(6)[3:6]
+all_features <- c(igg_features, fc_features)
+feature_plots <- setNames(lapply(all_features, function(feature) {
+  plot_longitudinal_feature(
+    long_data = long_data,
+    feature = feature,
+    thresholds = neg_control_threshold,
+    colors = visit_colors,
+    x_labels = make_x_labels(feature),
+    y_positions = seq(annotation_start(feature), by = 0.55, length.out = 10)
+  )
+}), all_features)
+
+supplement_1_igg <- ggarrange(
+  plotlist = feature_plots[igg_features],
+  nrow = 2,
+  ncol = 5
+)
+supplement_1_fc <- ggarrange(
+  plotlist = feature_plots[fc_features],
+  nrow = 2,
+  ncol = 5
+)
+```
+
+## 4. Save supplementary panels
+
+```{r save-figures}
+ggsave(
+  output_path("Sup_Fig_1", "Sup_Figure_1_IgG.png"),
+  supplement_1_igg,
+  width = 10,
+  height = 3.5,
+  units = "in"
+)
+ggsave(
+  output_path("Sup_Fig_1", "Sup_Figure_1_Fc_receptors.png"),
+  supplement_1_fc,
+  width = 10,
+  height = 3.5,
+  units = "in"
+)
+```

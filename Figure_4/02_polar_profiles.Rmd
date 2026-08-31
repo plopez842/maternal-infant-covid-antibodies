@@ -1,0 +1,143 @@
+---
+title: "Figure 4A - Six-month antibody profiles by vaccination timing"
+output: html_document
+---
+
+This notebook displays percentile-ranked six-month antibody profiles for the
+three maternal vaccination-timing groups. Run `01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(tidyr)
+library(viridis)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+stopifnot(all(vapply(c("temp_data", "temp_meta"), exists, logical(1))))
+```
+
+## 1. Rank measurements within each feature
+
+```{r prepare-data}
+antigen_pattern <- paste(
+  c(
+    "RBD_beta", "RBD_delta", "RBD_gamma", "RBD_omicron", "S1", "S2",
+    "Spike_alpha", "Spike_beta", "Spike_delta", "Spike_gamma",
+    "Spike_omicron", "RBD_alpha", "RBD_WT", "Spike_WT", "OC43", "HKU1"
+  ),
+  collapse = "|"
+)
+serology_data <- select_serology_features(
+  temp_data,
+  include = antigen_pattern,
+  exclude = "$^"
+)
+
+polar_data <- serology_data %>%
+  mutate(vaccine_group = temp_meta$Vax_group) %>%
+  pivot_longer(
+    cols = all_of(names(serology_data)),
+    names_to = "feature",
+    values_to = "value"
+  ) %>%
+  group_by(feature) %>%
+  mutate(percentile_rank = percent_rank(value)) %>%
+  ungroup() %>%
+  group_by(vaccine_group, feature) %>%
+  summarize(mean_percentile = mean(percentile_rank, na.rm = TRUE), .groups = "drop") %>%
+  separate(
+    feature,
+    into = c("assay", "antigen"),
+    sep = "_",
+    extra = "merge",
+    remove = FALSE
+  )
+```
+
+## 2. Select the Figure 4A antigens and assays
+
+```{r select-features}
+antigen_levels <- c("Spike WT", "S1", "S2", "RBD WT")
+excluded_assays <- c("IgM", "IgA1", "IgA2", "IgG2", "IgG4", "FcaR")
+
+polar_summary <- polar_data %>%
+  mutate(
+    antigen = gsub("_", " ", antigen),
+    antigen = factor(antigen, levels = antigen_levels),
+    assay = recode(
+      assay,
+      IgG = "Total\nIgG",
+      FcgR2AR = "FcgR2A",
+      FcgR3AV = "FcgR3A"
+    )
+  ) %>%
+  filter(!is.na(antigen), !assay %in% excluded_assays)
+```
+
+## 3. Plot the three timing groups
+
+```{r plot-profiles}
+antigen_colors <- viridis(length(antigen_levels))
+names(antigen_colors) <- antigen_levels
+
+plot_polar_group <- function(group_name) {
+  plot_data <- polar_summary[polar_summary$vaccine_group == group_name, ]
+
+  ggplot(plot_data, aes(assay, mean_percentile, fill = antigen)) +
+    geom_col(
+      color = "black",
+      linewidth = 0.25,
+      position = position_dodge()
+    ) +
+    geom_hline(
+      yintercept = seq(0, 1, by = 0.25),
+      colour = "black",
+      linewidth = 0.4
+    ) +
+    coord_polar(clip = "off") +
+    scale_fill_manual(values = antigen_colors, drop = FALSE) +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(title = group_name, x = NULL, y = NULL, fill = "Antigen") +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_blank(),
+      axis.text.x = element_text(size = 12, face = "bold"),
+      plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+      panel.grid = element_blank(),
+      legend.text = element_text(size = 14),
+      legend.title = element_text(size = 16)
+    )
+}
+
+group_levels <- c("<20 weeks", "20 - 28 weeks", ">28 weeks")
+polar_plots <- lapply(group_levels, plot_polar_group)
+figure_4a <- ggarrange(
+  plotlist = polar_plots,
+  common.legend = TRUE,
+  legend = "right",
+  nrow = 1,
+  ncol = 3
+)
+```
+
+## 4. Save Figure 4A
+
+```{r save-figure}
+ggsave(
+  output_path("Figure_4", "Figure_4A_polar_profiles.png"),
+  figure_4a,
+  width = 14,
+  height = 5,
+  units = "in"
+)
+```

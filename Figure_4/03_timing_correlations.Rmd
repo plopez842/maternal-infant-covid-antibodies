@@ -1,0 +1,92 @@
+---
+title: "Figure 4B-C - Antibody correlations with vaccination timing"
+output: html_document
+---
+
+This notebook shows Spearman correlations between gestational age at maternal
+vaccination and selected six-month infant antibody measurements. Run
+`01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(ggpubr)
+library(ggsci)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+stopifnot(all(vapply(
+  c("new_sub_data_long", "neg_control_threshold"),
+  exists,
+  logical(1)
+)))
+```
+
+## Plot selected correlations
+
+```{r plot-correlations}
+features_to_plot <- c(
+  "IgG1_RBD_WT",
+  "FcgR2AR_S1",
+  "IgG1_S1",
+  "FcgR3B_RBD_gamma"
+)
+
+make_correlation_plot <- function(feature, group = NULL, subtitle, color) {
+  plot_data <- new_sub_data_long[new_sub_data_long$features == feature, ]
+  if (!is.null(group)) {
+    plot_data <- plot_data[plot_data$vax_group == group, ]
+  }
+
+  ggplot(plot_data, aes(Vax1_days, vals)) +
+    geom_point(shape = 21, fill = color, size = 4.5) +
+    geom_hline(
+      yintercept = unname(neg_control_threshold[feature]),
+      linetype = "dashed",
+      color = "red"
+    ) +
+    stat_cor(method = "spearman", label.y.npc = 0.1, color = color, size = 4) +
+    labs(
+      x = "Gestational age (days)",
+      y = "log10 (MFI)",
+      title = format_feature_label(feature),
+      subtitle = subtitle
+    ) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 18),
+      plot.subtitle = element_text(size = 15, hjust = 0.5)
+    )
+}
+
+panel_colors <- c("#1F77B4", "#ff0a3f", "#f39333")
+correlation_plots <- unlist(lapply(features_to_plot, function(feature) {
+  list(
+    make_correlation_plot(feature, NULL, "Entire third trimester", panel_colors[1]) +
+      geom_vline(xintercept = 32 * 7, linetype = "dashed"),
+    make_correlation_plot(feature, "<32_weeks", "28-32 weeks", panel_colors[2]),
+    make_correlation_plot(feature, ">32_weeks", "32-36 weeks", panel_colors[3])
+  )
+}), recursive = FALSE)
+
+figure_4bc <- ggarrange(plotlist = correlation_plots, ncol = 3, nrow = 4)
+```
+
+## Save Figure 4B-C panels
+
+```{r save-figure}
+ggsave(
+  output_path("Figure_4", "Figure_4BC_timing_correlations.png"),
+  figure_4bc,
+  width = 12,
+  height = 14,
+  units = "in"
+)
+```

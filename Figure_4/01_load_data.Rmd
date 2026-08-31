@@ -1,0 +1,104 @@
+---
+title: "Figure 4 - Load and prepare six-month infant data"
+output: html_document
+---
+
+Run this notebook first. It selects the six-month infant samples and prepares
+the feature sets used by every Figure 4 analysis.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+load_rdata("infant_data.RData", "infant_data")
+load_rdata("infant_metadata.RData", "infant_meta")
+load_rdata("negative_control_thresholds.RData", "neg_control_threshold")
+```
+
+## Select the six-month visit
+
+```{r six-month-data}
+m6 <- subset_timepoint(infant_data, infant_meta, "M6")
+infant_data_M6 <- m6$data
+infant_meta_M6 <- m6$metadata
+
+infant_data_persist <- apply_detection_thresholds(
+  infant_data,
+  neg_control_threshold
+)
+infant_persist_M6 <- infant_data_persist[infant_meta$Timepoint == "M6", ]
+
+temp_data <- infant_data_M6
+temp_meta <- infant_meta_M6
+temp_meta$Vax_group <- factor(
+  temp_meta$Vax1_group,
+  levels = c("Conc_20w", "20w_28w", "28w_Birth"),
+  labels = c("<20 weeks", "20 - 28 weeks", ">28 weeks")
+)
+```
+
+## Select features for the timing analyses
+
+```{r timing-feature-set}
+sub_meta <- temp_meta[temp_meta$Vax_group == ">28 weeks", ]
+sub_data <- temp_data[temp_data$Tube_labels %in% sub_meta$TubeID, ]
+
+cov_pattern <- paste(
+  c(
+    "RBD_beta", "RBD_delta", "RBD_gamma", "S1", "S2",
+    "Spike_alpha", "Spike_beta", "Spike_delta", "Spike_gamma",
+    "RBD_alpha", "RBD_WT", "Spike_WT"
+  ),
+  collapse = "|"
+)
+sub_temp_data_COV <- select_serology_features(
+  sub_data,
+  include = cov_pattern,
+  exclude = "IgA|IgM|FcaR|IgG2|IgG4"
+)
+
+sub_meta$Vax_group2 <- ifelse(
+  sub_meta$GA_Vax1_days <= 32 * 7,
+  "<32_weeks",
+  ">32_weeks"
+)
+
+sub_persist <- infant_persist_M6[
+  infant_persist_M6$Tube_labels %in% sub_meta$TubeID,
+]
+detection_counts <- colSums(
+  sub_persist[colnames(sub_temp_data_COV)],
+  na.rm = TRUE
+)
+sel_feat <- names(detection_counts[detection_counts >= 0])
+
+persis_6m_df <- data.frame(
+  feature = names(detection_counts),
+  persis_num = unname(detection_counts)
+) %>%
+  filter(feature %in% sel_feat) %>%
+  separate(feature, into = c("antibody", "antigen"), sep = "_", extra = "merge", remove = FALSE)
+
+Vax1_days <- sub_meta$GA_Vax1_days
+sub_COV_data <- sub_temp_data_COV[, sel_feat, drop = FALSE]
+new_sub_data <- cbind(
+  vax_group = sub_meta$Vax_group2,
+  Vax1_days,
+  sub_COV_data
+)
+new_sub_data_long <- pivot_longer(
+  new_sub_data,
+  cols = all_of(sel_feat),
+  names_to = "features",
+  values_to = "vals"
+)
+```

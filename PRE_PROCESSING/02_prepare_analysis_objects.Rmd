@@ -1,0 +1,166 @@
+---
+title: "02 - Prepare analysis objects"
+author: "Paola Lopez"
+output: html_document
+---
+
+This notebook applies the manuscript cohort rules, derives vaccination-timing
+groups, and saves the maternal, cord-blood, and infant objects used by the
+figure notebooks.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "data_preprocessing.R"))
+
+intermediate_file <- input_path("preprocessing_intermediate.RData")
+assert_files_exist(intermediate_file)
+load(intermediate_file)
+```
+
+## 1. Apply cohort exclusions
+
+Maternal vaccination with or without prior COVID-19 infection is retained.
+Infant samples collected after infant infection are excluded. Samples whose
+second maternal vaccine dose occurred after delivery are also excluded.
+
+```{r cohort-selection}
+keep_infant <- new_infant_meta$Sample_collected_after_baby_COVID != "Yes"
+infant_meta <- new_infant_meta[keep_infant, , drop = FALSE]
+infant_data <- new_infant_data[keep_infant, , drop = FALSE]
+
+mom_meta <- new_mom_meta
+mom_data <- comb_mom_data
+CB_meta_v2 <- cord_blood_meta
+CB_data_v2 <- comb_CB_data
+```
+
+## 2. Derive COVID-19 vaccination-timing groups
+
+```{r covid-vaccine-groups}
+add_covid_groups <- function(metadata) {
+  metadata$Vax1_group <- classify_covid_vaccination(
+    metadata$GA_Vax1_days,
+    metadata$GA_delivery_days
+  )
+  metadata$Vax2_group <- classify_covid_vaccination(
+    metadata$GA_Vax2_days,
+    metadata$GA_delivery_days
+  )
+  metadata
+}
+
+infant_meta <- add_covid_groups(infant_meta)
+mom_meta <- add_covid_groups(mom_meta)
+
+infant_match <- match(CB_meta_v2$PediID, new_infant_meta$PediID)
+CB_meta_v2$GA_Vax1_days <- new_infant_meta$GA_Vax1_days[infant_match]
+CB_meta_v2$GA_Vax2_days <- new_infant_meta$GA_Vax2_days[infant_match]
+CB_meta_v2$GA_delivery_days <- new_infant_meta$GA_delivery_days[infant_match]
+CB_meta_v2 <- add_covid_groups(CB_meta_v2)
+
+keep_infant <- infant_meta$Vax2_group != "Post-preg"
+infant_data <- infant_data[keep_infant, , drop = FALSE]
+infant_meta <- infant_meta[keep_infant, , drop = FALSE]
+
+keep_maternal <- mom_meta$Vax2_group != "Post-preg"
+mom_data <- mom_data[keep_maternal, , drop = FALSE]
+mom_meta <- mom_meta[keep_maternal, , drop = FALSE]
+
+keep_cord <- CB_meta_v2$Vax2_group != "Post-preg"
+CB_data_v2 <- CB_data_v2[keep_cord, , drop = FALSE]
+CB_meta_v2 <- CB_meta_v2[keep_cord, , drop = FALSE]
+```
+
+## 3. Derive influenza and Tdap timing groups
+
+```{r other-vaccine-groups}
+add_other_vaccine_groups <- function(metadata) {
+  metadata$Flu_vax_group <- classify_pregnancy_vaccination(
+    metadata$GA_flu_days,
+    metadata$GA_delivery_days
+  )
+  metadata$TDAP_vax_group <- classify_pregnancy_vaccination(
+    metadata$GA_TDAP_days,
+    metadata$GA_delivery_days
+  )
+  metadata$Flu_vax_group <- collapse_outside_pregnancy(metadata$Flu_vax_group)
+  metadata$TDAP_vax_group <- collapse_outside_pregnancy(metadata$TDAP_vax_group)
+  metadata
+}
+
+infant_meta <- add_other_vaccine_groups(infant_meta)
+mom_meta <- add_other_vaccine_groups(mom_meta)
+
+CB_meta_v2$GA_flu_days <- new_infant_meta$GA_flu_days[infant_match][keep_cord]
+CB_meta_v2$GA_TDAP_days <- new_infant_meta$GA_TDAP_days[infant_match][keep_cord]
+CB_meta_v2 <- add_other_vaccine_groups(CB_meta_v2)
+
+flu_levels <- c(
+  "Before Pregnancy",
+  "Before 20 weeks",
+  "Between 20 to 28 weeks",
+  "After 28 weeks",
+  "Outside Pregnancy"
+)
+
+infant_meta$Flu_vax_group <- factor(infant_meta$Flu_vax_group, levels = flu_levels)
+mom_meta$Flu_vax_group <- factor(mom_meta$Flu_vax_group, levels = flu_levels)
+CB_meta_v2$Flu_vax_group <- factor(CB_meta_v2$Flu_vax_group, levels = flu_levels)
+
+infant_meta$TDAP_vax_group <- factor(
+  infant_meta$TDAP_vax_group,
+  levels = c("Before 20 weeks", "Between 20 to 28 weeks", "After 28 weeks")
+)
+mom_meta$TDAP_vax_group <- factor(
+  mom_meta$TDAP_vax_group,
+  levels = c("Between 20 to 28 weeks", "After 28 weeks")
+)
+CB_meta_v2$TDAP_vax_group <- factor(
+  CB_meta_v2$TDAP_vax_group,
+  levels = c("Between 20 to 28 weeks", "After 28 weeks")
+)
+```
+
+## 4. Label the five joint vaccination groups
+
+```{r joint-vaccine-groups}
+infant_meta$unique_groups <- label_covid_vaccine_groups(
+  infant_meta$Vax1_group,
+  infant_meta$Vax2_group
+)
+mom_meta$unique_groups <- label_covid_vaccine_groups(
+  mom_meta$Vax1_group,
+  mom_meta$Vax2_group
+)
+CB_meta_v2$unique_groups <- label_covid_vaccine_groups(
+  CB_meta_v2$Vax1_group,
+  CB_meta_v2$Vax2_group
+)
+```
+
+## 5. Validate and save the analysis inputs
+
+```{r save-analysis-objects}
+stopifnot(
+  nrow(infant_data) == nrow(infant_meta),
+  nrow(mom_data) == nrow(mom_meta),
+  nrow(CB_data_v2) == nrow(CB_meta_v2)
+)
+
+save_rdata("infant_data", "infant_data.RData")
+save_rdata("infant_meta", "infant_metadata.RData")
+save_rdata("mom_data", "maternal_data.RData")
+save_rdata("mom_meta", "maternal_metadata.RData")
+save_rdata("CB_data_v2", "cord_data.RData")
+save_rdata("CB_meta_v2", "cord_metadata.RData")
+save_rdata("neg_control_threshold", "negative_control_thresholds.RData")
+```

@@ -1,0 +1,168 @@
+---
+title: "Figure 4D - Vaccination-timing correlation heatmap"
+output: html_document
+---
+
+This notebook summarizes feature-wise Spearman correlations for infants whose
+mothers received their first vaccine dose at 28-32 or 32-36 gestational weeks.
+Run `01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+stopifnot(all(vapply(
+  c("new_sub_data_long", "persis_6m_df", "neg_control_threshold"),
+  exists,
+  logical(1)
+)))
+```
+
+## 1. Calculate feature-wise Spearman correlations
+
+```{r calculate-correlations}
+spearman_by_feature <- function(data, group_name, require_detection = FALSE) {
+  results <- lapply(split(data, data$features), function(feature_data) {
+    complete <- complete.cases(feature_data$Vax1_days, feature_data$vals)
+    x <- feature_data$Vax1_days[complete]
+    y <- feature_data$vals[complete]
+
+    can_test <- length(x) >= 3 && stats::sd(x) > 0 && stats::sd(y) > 0
+    if (can_test) {
+      test <- suppressWarnings(cor.test(
+        x,
+        y,
+        method = "spearman",
+        exact = FALSE
+      ))
+      rho <- unname(test$estimate)
+      p_value <- test$p.value
+    } else {
+      rho <- NA_real_
+      p_value <- NA_real_
+    }
+
+    if (require_detection) {
+      feature <- feature_data$features[1]
+      detected_fraction <- mean(
+        feature_data$vals >= unname(neg_control_threshold[feature]),
+        na.rm = TRUE
+      )
+      if (detected_fraction <= 0.30) {
+        rho <- NA_real_
+      }
+    }
+
+    data.frame(
+      feature = feature_data$features[1],
+      rho = rho,
+      p_value = p_value,
+      timing_group = group_name
+    )
+  })
+  bind_rows(results)
+}
+
+all_correlations <- spearman_by_feature(
+  new_sub_data_long,
+  "Entire third trimester"
+)
+early_correlations <- spearman_by_feature(
+  new_sub_data_long[new_sub_data_long$vax_group == "<32_weeks", ],
+  "28-32 weeks",
+  require_detection = TRUE
+)
+late_correlations <- spearman_by_feature(
+  new_sub_data_long[new_sub_data_long$vax_group == ">32_weeks", ],
+  "32-36 weeks",
+  require_detection = TRUE
+)
+
+correlation_results <- bind_rows(
+  all_correlations,
+  early_correlations,
+  late_correlations
+) %>%
+  left_join(
+    persis_6m_df %>% select(feature, persis_num),
+    by = "feature"
+  ) %>%
+  separate(
+    feature,
+    into = c("antibody", "antigen"),
+    sep = "_",
+    extra = "merge",
+    remove = FALSE
+  )
+```
+
+## 2. Plot the 28-32 and 32-36 week correlation heatmaps
+
+```{r plot-heatmap}
+plot_data <- correlation_results %>%
+  filter(timing_group != "Entire third trimester") %>%
+  mutate(
+    timing_group = factor(
+      timing_group,
+      levels = c("28-32 weeks", "32-36 weeks")
+    ),
+    antigen = gsub("_", " ", antigen),
+    antibody = recode(
+      antibody,
+      IgG = "Total IgG",
+      FcgR2AR = "FcgR2A",
+      FcgR3AV = "FcgR3A"
+    )
+  )
+
+figure_4d <- ggplot(plot_data, aes(antigen, antibody, fill = rho)) +
+  geom_tile(color = "black", linewidth = 0.5) +
+  scale_fill_gradient2(
+    name = "Spearman\ncorrelation",
+    low = "#1207A3",
+    mid = "white",
+    high = "#BB0103",
+    midpoint = 0,
+    na.value = "gray"
+  ) +
+  coord_equal() +
+  facet_grid(~timing_group) +
+  theme_classic() +
+  theme(
+    axis.line = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      face = "bold",
+      size = 15
+    ),
+    axis.text.y = element_text(face = "bold", size = 15),
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold", size = 18)
+  )
+```
+
+## 3. Save Figure 4D
+
+```{r save-figure}
+ggsave(
+  output_path("Figure_4", "Figure_4D_correlation_heatmap.png"),
+  figure_4d,
+  width = 14,
+  height = 7,
+  units = "in"
+)
+```

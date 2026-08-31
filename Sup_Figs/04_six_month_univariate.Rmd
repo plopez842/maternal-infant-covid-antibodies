@@ -1,0 +1,104 @@
+---
+title: "Supplementary Figure 4 - Six-month univariate comparisons"
+output: html_document
+---
+
+This notebook compares selected six-month antibody features across the three
+maternal vaccination-timing groups. Run `Figure_4/01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggsci)
+library(rstatix)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+source(file.path(helper_dir, "plotting_functions.R"))
+
+stopifnot(all(vapply(
+  c("temp_data", "temp_meta", "sel_feat", "neg_control_threshold"),
+  exists,
+  logical(1)
+)))
+```
+
+## 1. Reshape measurements and test group differences
+
+```{r statistics}
+feature_data <- temp_data[, sel_feat, drop = FALSE]
+feature_data <- feature_data[, !grepl("IgA|IgM|FcaR", names(feature_data)), drop = FALSE]
+
+long_data <- feature_data %>%
+  mutate(Vax_group = temp_meta$Vax_group) %>%
+  pivot_longer(
+    cols = all_of(names(feature_data)),
+    names_to = "feature",
+    values_to = "value"
+  )
+
+feature_tests <- kruskal_by_feature(long_data, group_column = "Vax_group")
+long_data <- add_detection_status(long_data, neg_control_threshold)
+detection_summary <- summarize_detection(long_data, group_column = "Vax_group")
+```
+
+## 2. Plot selected features
+
+```{r plot-features}
+features_to_plot <- unique(c(
+  "IgG3_Spike_gamma",
+  "IgG_S1",
+  "IgG1_Spike_WT",
+  "FcgR3B_Spike_beta",
+  "FcgR3AV_Spike_WT",
+  "FcgR2AR_RBD_WT",
+  "IgG1_S1",
+  "FcgR3B_RBD_WT",
+  "FcgR2AR_Spike_alpha",
+  "FcRn_RBD_gamma"
+))
+
+vax_group_colors <- ggsci::pal_simpsons()(5)
+vax_colors <- c(vax_group_colors[2], vax_group_colors[1], vax_group_colors[5])
+
+feature_plots <- setNames(lapply(features_to_plot, function(feature) {
+  plot_data <- long_data[long_data$feature == feature, , drop = FALSE]
+
+  ggplot(plot_data, aes(Vax_group, value, fill = Vax_group)) +
+    geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), linewidth = 0.5, alpha = 0.75) +
+    geom_hline(
+      yintercept = unname(neg_control_threshold[feature]),
+      linetype = "dashed"
+    ) +
+    scale_fill_manual(values = vax_colors) +
+    labs(
+      x = "Vaccine dose 1 group",
+      y = "log10 (MFI)",
+      title = format_feature_label(feature)
+    ) +
+    publication_theme(title_size = 12, axis_title_size = 10, axis_text_size = 8) +
+    theme(axis.title.x = element_text(size = 10, face = "bold"))
+}), features_to_plot)
+```
+
+## 3. Save individual panels
+
+```{r save-figures}
+invisible(lapply(names(feature_plots), function(feature) {
+  ggsave(
+    output_path("Sup_Fig_4", paste0(feature, ".png")),
+    feature_plots[[feature]],
+    width = 3,
+    height = 3,
+    units = "in"
+  )
+}))
+```

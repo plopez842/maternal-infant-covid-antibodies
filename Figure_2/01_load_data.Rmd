@@ -1,0 +1,51 @@
+---
+title: "Figure 2 - Load and prepare data"
+output: html_document
+---
+
+Run this notebook first. It prepares the cord-blood and infant data used for
+the variant heatmap and Omicron comparison.
+
+```{r setup, message=FALSE, warning=FALSE}
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+
+load_rdata("infant_data.RData", "infant_data")
+load_rdata("infant_metadata.RData", "infant_meta")
+load_rdata("cord_data.RData", "CB_data_v2")
+load_rdata("cord_metadata.RData", "CB_meta_v2")
+load_rdata("negative_control_thresholds.RData", "neg_control_threshold")
+```
+
+## Separate infant visits
+
+```{r split-timepoints}
+m2 <- subset_timepoint(infant_data, infant_meta, "M2")
+m6 <- subset_timepoint(infant_data, infant_meta, "M6")
+
+infant_data_M2 <- m2$data
+infant_meta_M2 <- m2$metadata
+infant_data_M6 <- m6$data
+infant_meta_M6 <- m6$metadata
+```
+
+## Apply detection thresholds
+
+```{r detection-status}
+infant_data_persist <- apply_detection_thresholds(
+  infant_data,
+  neg_control_threshold
+)
+CB_data_persist <- apply_detection_thresholds(
+  CB_data_v2,
+  neg_control_threshold
+)
+
+infant_persist_M2 <- infant_data_persist[infant_meta$Timepoint == "M2", ]
+infant_persist_M6 <- infant_data_persist[infant_meta$Timepoint == "M6", ]
+```

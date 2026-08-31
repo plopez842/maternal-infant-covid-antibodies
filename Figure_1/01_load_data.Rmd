@@ -1,0 +1,69 @@
+---
+title: "Figure 1 - Load and prepare data"
+output: html_document
+---
+
+Run this notebook first. It loads the processed study objects, separates infant
+samples by visit, and applies the negative-control detection thresholds.
+
+```{r setup, message=FALSE, warning=FALSE}
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+```
+
+## Load processed objects
+
+```{r load-data}
+load_rdata("infant_data.RData", "infant_data")
+load_rdata("infant_metadata.RData", "infant_meta")
+load_rdata("maternal_data.RData", "mom_data")
+load_rdata("maternal_metadata.RData", "mom_meta")
+load_rdata("cord_data.RData", "CB_data_v2")
+load_rdata("cord_metadata.RData", "CB_meta_v2")
+load_rdata("negative_control_thresholds.RData", "neg_control_threshold")
+```
+
+## Separate infant visits
+
+```{r split-timepoints}
+m2 <- subset_timepoint(infant_data, infant_meta, "M2")
+m6 <- subset_timepoint(infant_data, infant_meta, "M6")
+m9 <- subset_timepoint(infant_data, infant_meta, "M9")
+m12 <- subset_timepoint(infant_data, infant_meta, "M12")
+
+infant_data_M2 <- m2$data
+infant_meta_M2 <- m2$metadata
+infant_data_M6 <- m6$data
+infant_meta_M6 <- m6$metadata
+infant_data_M9 <- m9$data
+infant_meta_M9 <- m9$metadata
+infant_data_M12 <- m12$data
+infant_meta_M12 <- m12$metadata
+```
+
+## Apply detection thresholds
+
+```{r detection-status}
+infant_data_persist <- apply_detection_thresholds(
+  infant_data,
+  neg_control_threshold
+)
+CB_data_persist <- apply_detection_thresholds(
+  CB_data_v2,
+  neg_control_threshold
+)
+mom_data_persist <- apply_detection_thresholds(
+  mom_data,
+  neg_control_threshold
+)
+
+infant_persist_M2 <- infant_data_persist[infant_meta$Timepoint == "M2", ]
+infant_persist_M6 <- infant_data_persist[infant_meta$Timepoint == "M6", ]
+infant_persist_M9 <- infant_data_persist[infant_meta$Timepoint == "M9", ]
+infant_persist_M12 <- infant_data_persist[infant_meta$Timepoint == "M12", ]
+```

@@ -1,0 +1,205 @@
+---
+title: "Supplementary Figure 4 - PLSDA of six-month infant profiles"
+output: html_document
+---
+
+This notebook compares six-month infant antibody profiles across the three
+maternal vaccination-timing groups. Run `Figure_4/01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(ggsci)
+library(RColorBrewer)
+library(ropls)
+library(systemsseRology)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+source(file.path(helper_dir, "plotting_functions.R"))
+
+stopifnot(all(vapply(
+  c("temp_data", "temp_meta", "sel_feat", "infant_persist_M6"),
+  exists,
+  logical(1)
+)))
+set.seed(2023)
+```
+
+## 1. Prepare the three vaccination groups
+
+```{r prepare-groups}
+group_levels <- c("<20 weeks", "20 - 28 weeks", ">28 weeks")
+keep <- temp_meta$Vax_group %in% group_levels
+analysis_meta <- temp_meta[keep, , drop = FALSE]
+analysis_data <- temp_data[keep, , drop = FALSE]
+y <- factor(analysis_meta$Vax_group, levels = group_levels)
+
+simpsons_colors <- ggsci::pal_simpsons()(5)
+group_colors <- c(simpsons_colors[2], simpsons_colors[1], simpsons_colors[5])
+names(group_colors) <- group_levels
+```
+
+## 2. Filter and scale serology features
+
+Features detected in at least 30% of the selected samples are retained.
+
+```{r prepare-features}
+serology_data <- analysis_data[, sel_feat, drop = FALSE]
+detection_data <- infant_persist_M6[keep, , drop = FALSE]
+serology_data <- filter_detected_features(
+  serology_data,
+  detection_data,
+  minimum_fraction = 0.30
+)
+
+X <- scale(serology_data, center = TRUE, scale = TRUE)
+```
+
+## 3. Configure feature annotations and colors
+
+```{r plot-options}
+feature_info <- make_plsda_feature_metadata(
+  colnames(X),
+  colors = list(`Vax1 Group` = group_colors)
+)
+
+plot_options <- list(
+  df_features = feature_info$metadata,
+  loading_alpha = 1,
+  score_alpha = 1,
+  LV_ind = c(1, 2),
+  color_features = "antigen",
+  colors = feature_info$colors,
+  y_name = "Vax1 Group",
+  alpha = 1,
+  size = 2.5,
+  stroke = 0.5
+)
+```
+
+## 4. Fit full and selected-feature PLSDA models
+
+LASSO selection is repeated 100 times. Features selected in at least 30% of
+trials are used in the final model.
+
+```{r fit-models}
+plsda_options <- list(n_LV = 2)
+full_model <- train_ropls(X, y, options = plsda_options)
+full_scores <- visualize_ropls_scores(full_model, y, options = plot_options)
+
+selection_options <- list(
+  n_trials = 100,
+  threshold = 0.30,
+  return_count = FALSE
+)
+selected_features <- select_repeat(
+  X,
+  y,
+  selector = select_lasso,
+  options = selection_options
+)
+
+X_selected <- X[, selected_features, drop = FALSE]
+selected_model <- train_ropls(X_selected, y, options = plsda_options)
+
+selected_scores <- visualize_ropls_scores(
+  selected_model,
+  y,
+  options = plot_options
+) +
+  theme(axis.title = element_text(size = 18, face = "bold"))
+
+selected_loadings <- visualize_ropls_loadings(
+  selected_model,
+  options = plot_options
+) +
+  theme(axis.title = element_text(size = 18, face = "bold"))
+
+loading_options <- plot_options
+loading_options$X <- X_selected
+loading_options$y <- y
+loading_options$LV_ind <- 1
+loading_options$mark_enrichment <- TRUE
+selected_loading_bars <- visualize_ropls_loadings_bar(
+  selected_model,
+  options = loading_options
+)
+```
+
+## 5. Summarize variable importance
+
+```{r vip}
+vip_table <- make_vip_table(selected_model, X, y, minimum_vip = 1)
+
+vip_plot <- ggplot(vip_table, aes(label, VIP, fill = enriched)) +
+  geom_col(color = "black") +
+  scale_fill_manual(values = group_colors) +
+  labs(x = NULL, y = "VIP score") +
+  theme_classic() +
+  theme(
+    axis.title.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.position = "none"
+  )
+```
+
+## 6. Validate the model
+
+```{r model-validation}
+lasso_selector <- function(X, y) {
+  select_repeat(
+    X,
+    y,
+    selector = select_lasso,
+    options = selection_options
+  )
+}
+validation_method <- list(
+  select = lasso_selector,
+  train = train_ropls,
+  predict = predict_ropls,
+  score = score_accuracy
+)
+validation_options <- list(
+  n_folds = 10,
+  rf_trials = 0,
+  pt_trials = 100,
+  save = TRUE,
+  compare_pred = "y"
+)
+
+validation_results <- validate_repeat(
+  X,
+  y,
+  validation_method,
+  validation_options,
+  n_trials = 10
+)
+validation_plot <- visualize_validate(
+  validation_results,
+  options = list(y_label = "accuracy")
+)
+```
+
+## 7. Save supplementary results
+
+```{r save-results}
+ggsave(output_path("Sup_Fig_4", "PLSDA_scores.png"), selected_scores)
+ggsave(output_path("Sup_Fig_4", "PLSDA_loadings.png"), selected_loadings)
+ggsave(output_path("Sup_Fig_4", "PLSDA_VIP.png"), vip_plot)
+ggsave(output_path("Sup_Fig_4", "PLSDA_validation.png"), validation_plot)
+
+write.csv(
+  data.frame(feature = selected_features),
+  output_path("Sup_Fig_4", "PLSDA_selected_features.csv"),
+  row.names = FALSE
+)
+```

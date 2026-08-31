@@ -1,0 +1,96 @@
+---
+title: "Figure 3A - Maternal vaccination-timing groups"
+output: html_document
+---
+
+This notebook visualizes the gestational timing of maternal vaccine doses for
+the five groups used in the two-month infant analysis. Run `01_load_data.Rmd`
+first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+
+stopifnot(exists("infant_meta_M2"))
+```
+
+## 1. Prepare dose timing data
+
+```{r prepare-data}
+group_descriptions <- c(
+  "Group 1\nD1 and D2: <20 weeks",
+  "Group 2\nD1: <20 weeks; D2: 20-28 weeks",
+  "Group 3\nD1 and D2: 20-28 weeks",
+  "Group 4\nD1: 20-28 weeks; D2: >28 weeks",
+  "Group 5\nD1 and D2: >28 weeks"
+)
+names(group_descriptions) <- paste("Group", 1:5)
+
+timing_data <- infant_meta_M2 %>%
+  mutate(
+    group = factor(
+      group_descriptions[as.character(unique_groups)],
+      levels = group_descriptions
+    )
+  ) %>%
+  pivot_longer(
+    cols = c(GA_Vax1_days, GA_Vax2_days),
+    names_to = "dose",
+    values_to = "gestational_age_days"
+  ) %>%
+  mutate(
+    dose = factor(
+      dose,
+      levels = c("GA_Vax2_days", "GA_Vax1_days"),
+      labels = c("Dose 2 (D2)", "Dose 1 (D1)")
+    )
+  )
+```
+
+## 2. Plot vaccination timing
+
+```{r plot-groups}
+group_colors <- c("#669ccb", "#004488", "#eccc64", "#92414e", "#e69aa3")
+
+figure_3a <- ggplot(
+  timing_data,
+  aes(gestational_age_days, dose, fill = group)
+) +
+  stat_boxplot(geom = "errorbar") +
+  geom_boxplot() +
+  geom_vline(xintercept = c(20, 28) * 7, linetype = "dotted") +
+  facet_grid(group ~ ., switch = "y") +
+  scale_fill_manual(values = group_colors) +
+  labs(x = "Gestational age (days) when dose was given", y = NULL) +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    strip.background = element_blank(),
+    strip.text.y.left = element_text(angle = 0, size = 18, face = "bold"),
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.margin = grid::unit(rep(1, 4), "cm")
+  )
+```
+
+## 3. Save Figure 3A
+
+```{r save-figure}
+ggsave(
+  output_path("Figure_3", "Figure_3A_vaccination_groups.png"),
+  figure_3a,
+  width = 11.5,
+  height = 14.5,
+  units = "in"
+)
+```

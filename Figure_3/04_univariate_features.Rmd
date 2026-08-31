@@ -1,0 +1,136 @@
+---
+title: "Figure 3 - Univariate antibody features by vaccination group"
+output: html_document
+---
+
+This notebook compares two-month infant antibody features across the five
+maternal vaccination-timing groups. Run `01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggpubr)
+library(rstatix)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+source(file.path(helper_dir, "plotting_functions.R"))
+
+stopifnot(all(vapply(
+  c("infant_data_M2", "infant_meta_M2", "neg_control_threshold"),
+  exists,
+  logical(1)
+)))
+```
+
+## 1. Define the displayed features
+
+```{r feature-sets}
+spike_features <- c(
+  paste0(c("IgG", "IgG1", "IgG2", "IgG3", "IgG4"), "_Spike_WT"),
+  paste0(c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B"), "_Spike_WT")
+)
+fc_features <- c(
+  paste0(c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B"), "_Spike_WT"),
+  paste0(c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B"), "_RBD_WT")
+)
+feature_sets <- list(spike = spike_features, fc = fc_features)
+
+all_features <- unique(unlist(feature_sets))
+long_data <- infant_data_M2[, all_features, drop = FALSE] %>%
+  mutate(vaccine_group = infant_meta_M2$unique_groups) %>%
+  pivot_longer(
+    cols = all_of(all_features),
+    names_to = "feature",
+    values_to = "value"
+  )
+
+feature_tests <- kruskal_by_feature(long_data, group_column = "vaccine_group")
+```
+
+## 2. Plot each feature
+
+```{r plot-features}
+group_colors <- c("#669ccb", "#004488", "#eccc64", "#92414e", "#e69aa3")
+
+plot_feature <- function(feature) {
+  plot_data <- long_data[long_data$feature == feature, , drop = FALSE]
+
+  plot <- ggplot(plot_data, aes(vaccine_group, value, fill = vaccine_group)) +
+    geom_violin(adjust = 0.6, draw_quantiles = c(0.25, 0.5, 0.75)) +
+    geom_hline(
+      yintercept = unname(neg_control_threshold[feature]),
+      linetype = "dashed"
+    ) +
+    scale_fill_manual(values = group_colors) +
+    labs(
+      x = "Group",
+      y = "log10 (MFI)",
+      title = format_feature_label(feature)
+    ) +
+    publication_theme(title_size = 18, axis_title_size = 16, axis_text_size = 12) +
+    theme(axis.title.x = element_text(size = 16))
+
+  test <- try(
+    dunn_test(plot_data, value ~ vaccine_group, p.adjust.method = "bonferroni"),
+    silent = TRUE
+  )
+  if (!inherits(test, "try-error")) {
+    test <- remove_ns(test)
+    if (nrow(test) > 0) {
+      test <- add_xy_position(test, x = "vaccine_group")
+      if (feature %in% c("IgG_Spike_WT", "IgG1_Spike_WT")) {
+        test$y.position <- seq(6.2, by = 0.15, length.out = nrow(test))
+      }
+      plot <- plot + add_pvalue(
+        test,
+        label = "p.adj.signif",
+        xmin = "xmin",
+        xmax = "xmax",
+        tip.length = c(0, 0)
+      )
+    }
+  }
+  plot
+}
+
+feature_plots <- setNames(lapply(all_features, plot_feature), all_features)
+figure_3_spike <- ggarrange(
+  plotlist = feature_plots[spike_features],
+  nrow = 2,
+  ncol = 5
+)
+figure_3_fc <- ggarrange(
+  plotlist = feature_plots[fc_features],
+  nrow = 2,
+  ncol = 5
+)
+```
+
+## 3. Save panels
+
+```{r save-figures}
+ggsave(
+  output_path("Figure_3", "Figure_3_univariate_Spike.png"),
+  figure_3_spike,
+  width = 12,
+  height = 7,
+  units = "in"
+)
+ggsave(
+  output_path("Figure_3", "Figure_3_univariate_Fc.png"),
+  figure_3_fc,
+  width = 12,
+  height = 7,
+  units = "in"
+)
+```

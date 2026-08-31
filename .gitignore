@@ -1,0 +1,15 @@
+.DS_Store
+.Rhistory
+.Ruserdata
+.Rproj.user/
+*.Rproj
+*.RData
+*.rda
+*.rds
+*.RDS
+*.xlsx
+*.xls
+*.csv
+*.html
+INPUT_VARIABLES/
+outputs/

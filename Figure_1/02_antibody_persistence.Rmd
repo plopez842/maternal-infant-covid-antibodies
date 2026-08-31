@@ -1,0 +1,141 @@
+---
+title: "Figure 1 - Maternal and infant antibody persistence"
+output: html_document
+---
+
+This notebook compares wild-type Spike and RBD antibody measurements across
+maternal blood, cord blood, and infant samples collected at two and six months.
+Run `01_load_data.Rmd` first.
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggpubr)
+library(ggsci)
+library(rstatix)
+library(tidyr)
+
+helper_dir <- if (dir.exists("../helpful_functions")) {
+  "../helpful_functions"
+} else {
+  "helpful_functions"
+}
+source(file.path(helper_dir, "data_io.R"))
+source(file.path(helper_dir, "analysis_functions.R"))
+source(file.path(helper_dir, "plotting_functions.R"))
+
+required_objects <- c(
+  "mom_data", "mom_meta", "CB_data_v2", "CB_meta_v2",
+  "infant_data_M2", "infant_meta_M2", "infant_data_M6", "infant_meta_M6",
+  "neg_control_threshold"
+)
+stopifnot(all(vapply(required_objects, exists, logical(1))))
+```
+
+## 1. Combine the four sample types
+
+```{r combine-samples}
+sample_blocks <- list(
+  make_sample_block(mom_data, mom_meta, "mom", "Infant_gender"),
+  make_sample_block(CB_data_v2, CB_meta_v2, "cord", "Infant_gender"),
+  make_sample_block(infant_data_M2, infant_meta_M2, "infant", "Fetal_Sex"),
+  make_sample_block(
+    infant_data_M6,
+    infant_meta_M6,
+    "infant 6 months",
+    "Fetal_Sex"
+  )
+)
+merged_samples <- do.call(rbind, sample_blocks)
+
+sample_levels <- c("mom", "cord", "infant", "infant 6 months")
+feature_data <- select_serology_features(
+  merged_samples,
+  include = "Spike_WT|RBD_WT"
+)
+long_data <- make_feature_long(merged_samples, feature_data, sample_levels)
+```
+
+## 2. Test differences and calculate detection counts
+
+Kruskal-Wallis tests are performed feature-by-feature. The resulting p-values
+are adjusted across features using the Benjamini-Hochberg FDR procedure.
+
+```{r statistics}
+feature_tests <- kruskal_by_feature(long_data)
+long_data <- add_detection_status(long_data, neg_control_threshold)
+detection_summary <- summarize_detection(long_data)
+```
+
+## 3. Plot longitudinal measurements
+
+```{r plot-features}
+igg_features <- c(
+  paste0(c("IgG", "IgG1", "IgG2", "IgG3", "IgG4"), "_Spike_WT"),
+  paste0(c("IgG", "IgG1", "IgG2", "IgG3", "IgG4"), "_RBD_WT")
+)
+fc_features <- c(
+  paste0(c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B"), "_Spike_WT"),
+  paste0(c("FcRn", "FcgR2AR", "FcgR2B", "FcgR3AV", "FcgR3B"), "_RBD_WT")
+)
+
+make_x_labels <- function(feature) {
+  counts <- detection_summary[detection_summary$feature == feature, ]
+  c(
+    mom = paste0("M\n", counts$mom),
+    cord = paste0("C\n", counts$cord),
+    infant = paste0("2 m.\n", counts$infant),
+    `infant 6 months` = paste0("6 m.\n", counts$`infant 6 months`)
+  )
+}
+
+annotation_start <- function(feature) {
+  if (grepl("IgG2|IgG3", feature)) 5.8 else if (grepl("IgG4", feature)) 6.0 else 6.7
+}
+
+type_colors <- ggsci::pal_npg()(4)
+all_features <- c(igg_features, fc_features)
+feature_plots <- setNames(lapply(all_features, function(feature) {
+  plot_longitudinal_feature(
+    long_data = long_data,
+    feature = feature,
+    thresholds = neg_control_threshold,
+    colors = type_colors,
+    x_labels = make_x_labels(feature),
+    y_positions = seq(annotation_start(feature), by = 0.55, length.out = 10)
+  )
+}), all_features)
+
+figure_1_igg <- ggarrange(
+  plotlist = feature_plots[igg_features],
+  nrow = 2,
+  ncol = 5
+)
+figure_1_fc <- ggarrange(
+  plotlist = feature_plots[fc_features],
+  nrow = 2,
+  ncol = 5
+)
+```
+
+## 4. Save figure panels
+
+```{r save-figures}
+ggsave(
+  output_path("Figure_1", "Figure_1A_IgG.png"),
+  figure_1_igg,
+  width = 10,
+  height = 3.6,
+  units = "in"
+)
+ggsave(
+  output_path("Figure_1", "Figure_1A_Fc_receptors.png"),
+  figure_1_fc,
+  width = 10,
+  height = 3.6,
+  units = "in"
+)
+```
